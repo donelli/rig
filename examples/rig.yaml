@@ -1,0 +1,44 @@
+# Minimal example: postgres (via docker compose), a backend, and a
+# frontend. The backend waits on postgres; the frontend waits on the
+# backend's readiness probe before starting.
+
+settings:
+  max_parallel_updates: 2
+
+services:
+  - name: postgres
+    serve_cmd: docker compose -f examples/docker-compose.yml up postgres
+    labels: [infra]
+    readiness:
+      exec:
+        cmd: ["docker", "compose", "-f", "examples/docker-compose.yml", "exec", "-T", "postgres", "pg_isready", "-U", "app"]
+      initial_delay: 2s
+      period: 2s
+      timeout: 2s
+      success_threshold: 1
+
+  - name: backend
+    serve_cmd: go run ./backend
+    labels: [backend]
+    depends_on: [postgres]
+    readiness:
+      http:
+        port: 8080
+        path: /health
+      initial_delay: 1s
+      period: 2s
+      timeout: 1s
+      success_threshold: 1
+
+  - name: frontend
+    serve_cmd: npm --prefix ./frontend run dev
+    labels: [frontend]
+    depends_on: [backend]
+    readiness:
+      http:
+        port: 5173
+        path: /
+      initial_delay: 1s
+      period: 2s
+      timeout: 1s
+      success_threshold: 1
