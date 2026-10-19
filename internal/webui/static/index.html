@@ -69,13 +69,18 @@
     justify-content: center;
     padding: 0;
     border-radius: 5px;
-    border: 1px solid #4f8cff;
-    color: #4f8cff;
+    border: none;
+    color: #5a6372;
     background: transparent;
     cursor: pointer;
     flex-shrink: 0;
+    opacity: 0;
   }
-  .trigger-btn:hover { background: #4f8cff; color: #fff; }
+  .service:hover .trigger-btn,
+  .trigger-btn:focus-visible {
+    opacity: 1;
+  }
+  .trigger-btn:hover { background: #262c33; color: #4f8cff; }
   .trigger-btn svg { width: 13px; height: 13px; }
 
   #main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
