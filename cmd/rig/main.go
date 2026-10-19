@@ -10,6 +10,7 @@ import (
 	"bufio"
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"os"
 	"os/signal"
@@ -20,6 +21,7 @@ import (
 	"github.com/eduardopellenz/rig/internal/bus"
 	"github.com/eduardopellenz/rig/internal/config"
 	"github.com/eduardopellenz/rig/internal/engine"
+	"github.com/eduardopellenz/rig/internal/webui"
 )
 
 func main() {
@@ -43,11 +45,15 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, `rig <command> [config file]
+	fmt.Fprintln(os.Stderr, `rig <command> [flags] [config file]
 
 Commands:
-  up [rig.yaml]     load config and run all services
-  check [rig.yaml]  validate config without running anything
+  up [flags] [rig.yaml]     load config and run all services
+  check [rig.yaml]          validate config without running anything
+
+Flags for "up":
+  -addr string    address for the web dashboard (default ":7190")
+  -no-ui          disable the web dashboard
 
 Config file defaults to ./rig.yaml.`)
 }
@@ -79,7 +85,12 @@ func runCheck(args []string) {
 }
 
 func runUp(args []string) {
-	path := configPath(args)
+	fs := flag.NewFlagSet("up", flag.ExitOnError)
+	addr := fs.String("addr", ":7190", "address for the web dashboard")
+	noUI := fs.Bool("no-ui", false, "disable the web dashboard")
+	_ = fs.Parse(args)
+
+	path := configPath(fs.Args())
 	cfg := loadOrDie(path)
 
 	e, err := engine.New(cfg)
@@ -101,6 +112,16 @@ func runUp(args []string) {
 
 	go printEvents(e)
 	go readStdinCommands(e, cancel)
+
+	if !*noUI {
+		srv := webui.New(e)
+		go func() {
+			if err := srv.Run(ctx, *addr); err != nil {
+				fmt.Fprintf(os.Stderr, "web ui: %v\n", err)
+			}
+		}()
+		fmt.Printf("dashboard:  http://localhost%s\n", *addr)
+	}
 
 	fmt.Printf("rig: %d services loaded from %s\n", len(cfg.Services), path)
 	fmt.Println(`type "ps", "trigger <name>", or "quit"`)

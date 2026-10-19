@@ -13,8 +13,8 @@ const (
 )
 
 type ServiceStatus struct {
-	Name   string
-	Status Status
-	Labels []string
-	PID    int
+	Name   string   `json:"name"`
+	Status Status   `json:"status"`
+	Labels []string `json:"labels"`
+	PID    int      `json:"pid"`
 }

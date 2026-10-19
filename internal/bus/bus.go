@@ -13,11 +13,11 @@ const (
 )
 
 type Event struct {
-	Type    EventType
-	Service string
-	Status  string // set when Type == EventStatus
-	Line    string // set when Type == EventLog
-	Stream  string // "stdout" | "stderr", set when Type == EventLog
+	Type    EventType `json:"type"`
+	Service string    `json:"service"`
+	Status  string    `json:"status,omitempty"` // set when Type == EventStatus
+	Line    string    `json:"line,omitempty"`   // set when Type == EventLog
+	Stream  string    `json:"stream,omitempty"` // "stdout" | "stderr", set when Type == EventLog
 }
 
 type Bus struct {
