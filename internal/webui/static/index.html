@@ -61,38 +61,36 @@
     text-overflow: ellipsis;
   }
   .service-status { font-size: 11px; color: #6b7684; text-transform: capitalize; }
-  .trigger-btn {
-    width: 22px;
-    height: 22px;
+
+  #main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  #terminal-header {
+    padding: 11px 16px 11px 20px;
+    border-bottom: 1px solid #262c33;
+    font-size: 13px;
+    color: #a9b2bc;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+  }
+  #header-actions { display: flex; align-items: center; gap: 2px; }
+  .icon-btn {
+    width: 26px;
+    height: 26px;
     display: flex;
     align-items: center;
     justify-content: center;
     padding: 0;
     border-radius: 5px;
     border: none;
-    color: #5a6372;
+    color: #8b95a1;
     background: transparent;
     cursor: pointer;
     flex-shrink: 0;
-    opacity: 0;
   }
-  .service:hover .trigger-btn,
-  .trigger-btn:focus-visible {
-    opacity: 1;
-  }
-  .trigger-btn:hover { background: #262c33; color: #4f8cff; }
-  .trigger-btn svg { width: 13px; height: 13px; }
-
-  #main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
-  #terminal-header {
-    padding: 13px 20px;
-    border-bottom: 1px solid #262c33;
-    font-size: 13px;
-    color: #a9b2bc;
-    display: flex;
-    align-items: center;
-    gap: 10px;
-  }
+  .icon-btn:hover { background: #262c33; color: #4f8cff; }
+  .icon-btn.danger:hover { color: #ff6b6b; }
+  .icon-btn svg { width: 14px; height: 14px; }
   #terminal {
     flex: 1;
     overflow-y: auto;
@@ -121,19 +119,25 @@
     <div id="service-list"></div>
   </div>
   <div id="main">
-    <div id="terminal-header">Select a service</div>
+    <div id="terminal-header">
+      <div id="header-title">Select a service</div>
+      <div id="header-actions"></div>
+    </div>
     <div id="terminal"><div class="empty-state">No service selected.</div></div>
   </div>
 
 <script>
 const RELOAD_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>';
+const STOP_ICON = '<svg viewBox="0 0 24 24" fill="currentColor"><rect x="5" y="5" width="14" height="14" rx="2"></rect></svg>';
+const PLAY_ICON = '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"></path></svg>';
 
 let services = {};
 let selected = null;
 
 const listEl = document.getElementById('service-list');
 const termEl = document.getElementById('terminal');
-const headerEl = document.getElementById('terminal-header');
+const titleEl = document.getElementById('header-title');
+const actionsEl = document.getElementById('header-actions');
 
 function escapeHtml(s) {
   return s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -172,17 +176,6 @@ function renderList() {
       row.appendChild(dot);
       row.appendChild(info);
 
-      if (svc.status !== 'pending' && svc.status !== 'blocked') {
-        const isManual = svc.status === 'manual';
-        const btn = document.createElement('button');
-        btn.className = 'trigger-btn';
-        btn.title = isManual ? 'Trigger' : 'Restart';
-        btn.setAttribute('aria-label', isManual ? 'Trigger' : 'Restart');
-        btn.innerHTML = RELOAD_ICON;
-        btn.onclick = (e) => { e.stopPropagation(); restartService(svc.name); };
-        row.appendChild(btn);
-      }
-
       listEl.appendChild(row);
     });
   });
@@ -190,8 +183,9 @@ function renderList() {
 
 async function selectService(name) {
   selected = name;
-  headerEl.textContent = name;
+  titleEl.textContent = name;
   renderList();
+  renderHeaderActions();
   termEl.innerHTML = '';
   try {
     const res = await fetch('/api/services/' + encodeURIComponent(name) + '/logs');
@@ -201,8 +195,46 @@ async function selectService(name) {
   scrollToBottom();
 }
 
+function iconButton(iconSvg, title, extraClass, onClick) {
+  const btn = document.createElement('button');
+  btn.className = 'icon-btn' + (extraClass ? ' ' + extraClass : '');
+  btn.title = title;
+  btn.setAttribute('aria-label', title);
+  btn.innerHTML = iconSvg;
+  btn.onclick = onClick;
+  return btn;
+}
+
+function renderHeaderActions() {
+  actionsEl.innerHTML = '';
+  const svc = selected ? services[selected] : null;
+  if (!svc) return;
+
+  switch (svc.status) {
+    case 'starting':
+    case 'healthy':
+      actionsEl.appendChild(iconButton(RELOAD_ICON, 'Restart', '', () => restartService(svc.name)));
+      actionsEl.appendChild(iconButton(STOP_ICON, 'Stop', 'danger', () => stopService(svc.name)));
+      break;
+    case 'stopped':
+      actionsEl.appendChild(iconButton(PLAY_ICON, 'Resume', '', () => restartService(svc.name)));
+      break;
+    case 'failed':
+      actionsEl.appendChild(iconButton(RELOAD_ICON, 'Restart', '', () => restartService(svc.name)));
+      break;
+    case 'manual':
+      actionsEl.appendChild(iconButton(RELOAD_ICON, 'Trigger', '', () => restartService(svc.name)));
+      break;
+    // pending/blocked: nothing to do yet, no actions
+  }
+}
+
 async function restartService(name) {
   await fetch('/api/services/' + encodeURIComponent(name) + '/restart', { method: 'POST' });
+}
+
+async function stopService(name) {
+  await fetch('/api/services/' + encodeURIComponent(name) + '/stop', { method: 'POST' });
 }
 
 function appendLogLine(entry) {
@@ -239,6 +271,7 @@ function connectStream() {
       if (services[data.service]) {
         services[data.service].status = data.status;
         renderList();
+        if (data.service === selected) renderHeaderActions();
       }
     } else if (data.type === 'log' && data.service === selected) {
       appendLogLine({ time: new Date().toISOString(), stream: data.stream, line: data.line });

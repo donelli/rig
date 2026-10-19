@@ -154,6 +154,49 @@ func (e *Engine) Restart(name string) error {
 	return nil
 }
 
+// Stop stops a currently running service (starting or healthy) and leaves
+// it stopped — unlike Restart, nothing runs again until Resume-via-Restart
+// (or Trigger, for a manual service) is called. Rejected for any status
+// without a live process to stop. Serialized against Restart/the initial
+// start via the same restartMu as Restart.
+func (e *Engine) Stop(name string) error {
+	e.mu.RLock()
+	_, ok := e.services[name]
+	status := e.statuses[name]
+	lock := e.restartMu[name]
+	e.mu.RUnlock()
+
+	if !ok {
+		return fmt.Errorf("unknown service %q", name)
+	}
+
+	switch status {
+	case StatusStarting, StatusHealthy:
+		// proceed
+	default:
+		return fmt.Errorf("service %q is not running (status: %s)", name, status)
+	}
+
+	lock.Lock()
+	defer lock.Unlock()
+
+	e.mu.Lock()
+	proc := e.processes[name]
+	delete(e.processes, name)
+	if proc != nil {
+		e.intentionalStop[name] = true
+	}
+	e.mu.Unlock()
+
+	if proc == nil {
+		return fmt.Errorf("service %q has no running process", name)
+	}
+
+	_ = proc.Stop(defaultStopGrace)
+	e.setStatus(name, StatusStopped)
+	return nil
+}
+
 // Status returns a point-in-time snapshot of every service, in dependency
 // order.
 func (e *Engine) Status() []ServiceStatus {

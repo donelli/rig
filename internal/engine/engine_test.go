@@ -199,6 +199,78 @@ func TestRestartReplacesProcessWithoutFalseFailure(t *testing.T) {
 	wg.Wait()
 }
 
+// TestStopThenResume starts a serve_cmd service, stops it (asserting it
+// lands in "stopped" with no process left), then resumes it via Restart
+// (the documented way to resume) and asserts it comes back healthy with a
+// new PID.
+func TestStopThenResume(t *testing.T) {
+	cfg := &config.Config{
+		Settings: config.Settings{MaxParallelUpdates: 5},
+		Services: []config.Service{
+			{Name: "a", ServeCmd: longRunningCmd()},
+		},
+	}
+
+	e, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	ch, unsubscribe := e.Bus().Subscribe()
+	defer unsubscribe()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_ = e.Up(ctx)
+	}()
+
+	waitForStatus(t, ch, "a", StatusHealthy, 5*time.Second)
+	oldPID := pidOf(t, e.Status(), "a")
+
+	if err := e.Stop("a"); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+
+	stopped := e.Status()
+	if got := statusOf(t, stopped, "a"); got != StatusStopped {
+		t.Fatalf("expected status %q after Stop, got %q", StatusStopped, got)
+	}
+	if pid := pidOf(t, stopped, "a"); pid > 0 {
+		t.Fatalf("expected no PID after Stop, got %d", pid)
+	}
+
+	// Stopping an already-stopped service should be rejected, not silently
+	// a no-op that could race a second Stop against nothing.
+	if err := e.Stop("a"); err == nil {
+		t.Fatalf("expected Stop on an already-stopped service to error")
+	}
+
+	if err := e.Restart("a"); err != nil {
+		t.Fatalf("Restart (resume): %v", err)
+	}
+
+	resumed := e.Status()
+	if got := statusOf(t, resumed, "a"); got != StatusHealthy {
+		t.Fatalf("expected status %q after resume, got %q", StatusHealthy, got)
+	}
+	newPID := pidOf(t, resumed, "a")
+	if newPID <= 0 {
+		t.Fatalf("expected a positive PID after resume, got %d", newPID)
+	}
+	if newPID == oldPID {
+		t.Fatalf("PID did not change after stop+resume (old=%d new=%d)", oldPID, newPID)
+	}
+	t.Logf("stop+resume: pid %d -> %d", oldPID, newPID)
+
+	cancel()
+	wg.Wait()
+}
+
 // TestRestartRejectsNotYetStarted builds a graph where "b" depends_on a
 // service that fails, so "b" ends up permanently blocked — and asserts
 // Restart refuses to force-start it. Allowing that would race with the
@@ -266,4 +338,15 @@ func pidOf(t *testing.T, statuses []ServiceStatus, name string) int {
 	}
 	t.Fatalf("no status found for service %q", name)
 	return -1
+}
+
+func statusOf(t *testing.T, statuses []ServiceStatus, name string) Status {
+	t.Helper()
+	for _, s := range statuses {
+		if s.Name == name {
+			return s.Status
+		}
+	}
+	t.Fatalf("no status found for service %q", name)
+	return ""
 }

@@ -123,7 +123,7 @@ func (s *Server) handleServices(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleServiceSub handles /api/services/{name}/logs (GET) and
-// /api/services/{name}/trigger (POST), and /api/services/{name}/restart (POST).
+// /api/services/{name}/{trigger,restart,stop} (POST).
 func (s *Server) handleServiceSub(w http.ResponseWriter, r *http.Request) {
 	rest := strings.TrimPrefix(r.URL.Path, "/api/services/")
 	parts := strings.SplitN(rest, "/", 2)
@@ -156,6 +156,16 @@ func (s *Server) handleServiceSub(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := s.engine.Restart(name); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	case "stop":
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if err := s.engine.Stop(name); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
