@@ -23,10 +23,21 @@ var staticFS embed.FS
 
 const maxLogLines = 2000
 
+// markerStatuses are the status transitions worth a visible marker line in
+// the log view — the ones that mean "a process just started or stopped,"
+// as opposed to scheduling states like pending/blocked/manual.
+var markerStatuses = map[string]bool{
+	string(engine.StatusStarting): true,
+	string(engine.StatusHealthy):  true,
+	string(engine.StatusFailed):   true,
+	string(engine.StatusStopped):  true,
+}
+
 type LogLine struct {
 	Time   time.Time `json:"time"`
-	Stream string    `json:"stream"`
-	Line   string    `json:"line"`
+	Stream string    `json:"stream,omitempty"`
+	Line   string    `json:"line,omitempty"`
+	Marker string    `json:"marker,omitempty"` // status name; set instead of Stream/Line for a lifecycle marker
 }
 
 type Server struct {
@@ -54,8 +65,11 @@ func (s *Server) Run(ctx context.Context, addr string) error {
 				if !ok {
 					return
 				}
-				if ev.Type == bus.EventLog {
+				switch {
+				case ev.Type == bus.EventLog:
 					s.appendLog(ev.Service, LogLine{Time: time.Now(), Stream: ev.Stream, Line: ev.Line})
+				case ev.Type == bus.EventStatus && markerStatuses[ev.Status]:
+					s.appendLog(ev.Service, LogLine{Time: time.Now(), Marker: ev.Status})
 				}
 			}
 		}

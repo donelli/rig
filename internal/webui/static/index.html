@@ -104,6 +104,22 @@
   .log-line .text.stderr { color: #ff8080; }
   .empty-state { color: #4b525c; padding: 4px 0; }
 
+  .log-marker {
+    display: flex;
+    gap: 10px;
+    align-items: baseline;
+    margin: 4px 0;
+    padding: 1px 0 1px 8px;
+    font-style: italic;
+    font-weight: 600;
+    border-left: 2px solid currentColor;
+  }
+  .log-marker .ts { color: #4b525c; flex-shrink: 0; font-style: normal; font-weight: 400; }
+  .log-marker.marker-starting { color: #4f8cff; }
+  .log-marker.marker-healthy  { color: #3ecf8e; }
+  .log-marker.marker-failed   { color: #ff5c5c; }
+  .log-marker.marker-stopped  { color: #8b95a1; }
+
   .status-pending  { background: #4b525c; }
   .status-blocked  { background: #8a4a4a; }
   .status-manual   { background: #d9a441; }
@@ -237,7 +253,18 @@ async function stopService(name) {
   await fetch('/api/services/' + encodeURIComponent(name) + '/stop', { method: 'POST' });
 }
 
+const MARKER_LABEL = {
+  starting: 'started',
+  healthy:  'healthy',
+  failed:   'failed',
+  stopped:  'stopped',
+};
+
 function appendLogLine(entry) {
+  if (entry.marker) {
+    appendMarkerLine(entry.marker, entry.time);
+    return;
+  }
   const empty = termEl.querySelector('.empty-state');
   if (empty) empty.remove();
   const row = document.createElement('div');
@@ -247,6 +274,18 @@ function appendLogLine(entry) {
   row.innerHTML =
     '<span class="ts">' + ts + '</span>' +
     '<span class="' + textClass + '">' + escapeHtml(entry.line) + '</span>';
+  termEl.appendChild(row);
+}
+
+function appendMarkerLine(status, timeStr) {
+  const label = MARKER_LABEL[status];
+  if (!label) return;
+  const empty = termEl.querySelector('.empty-state');
+  if (empty) empty.remove();
+  const row = document.createElement('div');
+  row.className = 'log-marker marker-' + status;
+  const ts = new Date(timeStr).toLocaleTimeString();
+  row.innerHTML = '<span class="ts">' + ts + '</span><span>' + escapeHtml(label) + '</span>';
   termEl.appendChild(row);
 }
 
@@ -271,7 +310,11 @@ function connectStream() {
       if (services[data.service]) {
         services[data.service].status = data.status;
         renderList();
-        if (data.service === selected) renderHeaderActions();
+        if (data.service === selected) {
+          renderHeaderActions();
+          appendMarkerLine(data.status, new Date().toISOString());
+          scrollToBottom();
+        }
       }
     } else if (data.type === 'log' && data.service === selected) {
       appendLogLine({ time: new Date().toISOString(), stream: data.stream, line: data.line });
