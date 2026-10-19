@@ -5,7 +5,6 @@ package supervisor
 import (
 	"os/exec"
 	"syscall"
-	"time"
 )
 
 var (
@@ -22,24 +21,13 @@ func platformSysProcAttr() *syscall.SysProcAttr {
 	return &syscall.SysProcAttr{CreationFlags: syscall.CREATE_NEW_PROCESS_GROUP}
 }
 
-func stopProcess(cmd *exec.Cmd, grace time.Duration) error {
-	if cmd.Process == nil {
-		return nil
-	}
-
-	done := make(chan error, 1)
-	go func() { done <- cmd.Wait() }()
-
-	// Best-effort graceful stop. Some processes ignore CTRL_BREAK_EVENT or
-	// aren't attached to a console at all (the call then simply fails) —
-	// either way we still fall back to a hard kill after grace.
+// signalGraceful is best-effort. Some processes ignore CTRL_BREAK_EVENT or
+// aren't attached to a console at all (the call then simply fails) — either
+// way the caller still falls back to hardKill after the grace period.
+func signalGraceful(cmd *exec.Cmd) {
 	_, _, _ = procGenerateConsoleCtrlEvent.Call(uintptr(ctrlBreakEvent), uintptr(cmd.Process.Pid))
+}
 
-	select {
-	case err := <-done:
-		return err
-	case <-time.After(grace):
-		_ = cmd.Process.Kill()
-		return <-done
-	}
+func hardKill(cmd *exec.Cmd) error {
+	return cmd.Process.Kill()
 }

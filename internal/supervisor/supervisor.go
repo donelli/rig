@@ -1,6 +1,7 @@
-// Package supervisor starts and stops subprocesses. Process-group creation
-// and graceful shutdown are OS-specific (see supervisor_unix.go /
-// supervisor_windows.go); everything else is shared here.
+// Package supervisor starts and stops subprocesses. Asking a process to
+// stop gracefully vs. force-killing it is OS-specific (see
+// supervisor_unix.go / supervisor_windows.go); everything else — including
+// the actual wait-for-exit logic — is shared here.
 package supervisor
 
 import (
@@ -16,6 +17,12 @@ import (
 type Process struct {
 	Name string
 	cmd  *exec.Cmd
+
+	// cmd.Wait() may only ever be called once, and never concurrently with
+	// itself (see exec.Cmd docs). A single goroutine, started in Start,
+	// owns the real call; Wait and Stop both just read from done/err.
+	done chan struct{}
+	err  error
 }
 
 type StartOptions struct {
@@ -52,15 +59,23 @@ func Start(opts StartOptions) (*Process, error) {
 		return nil, err
 	}
 
+	p := &Process{Name: opts.Name, cmd: cmd, done: make(chan struct{})}
+	go func() {
+		p.err = cmd.Wait()
+		close(p.done)
+	}()
+
 	go streamLines(opts.Name, "stdout", stdout, opts.Bus)
 	go streamLines(opts.Name, "stderr", stderr, opts.Bus)
 
-	return &Process{Name: opts.Name, cmd: cmd}, nil
+	return p, nil
 }
 
-// Wait blocks until the process exits and returns its error (nil on exit 0).
+// Wait blocks until the process exits and returns its error (nil on exit
+// 0). Safe to call any number of times, from any number of goroutines.
 func (p *Process) Wait() error {
-	return p.cmd.Wait()
+	<-p.done
+	return p.err
 }
 
 func (p *Process) Pid() int {
@@ -71,9 +86,23 @@ func (p *Process) Pid() int {
 }
 
 // Stop asks the process (group) to shut down gracefully and escalates to a
-// hard kill if it hasn't exited within grace. Implemented per-OS.
+// hard kill if it hasn't exited within grace. Safe to call concurrently
+// with itself or with Wait.
 func (p *Process) Stop(grace time.Duration) error {
-	return stopProcess(p.cmd, grace)
+	if p.cmd.Process == nil {
+		return nil
+	}
+
+	signalGraceful(p.cmd)
+
+	select {
+	case <-p.done:
+		return p.err
+	case <-time.After(grace):
+		_ = hardKill(p.cmd)
+		<-p.done
+		return p.err
+	}
 }
 
 func streamLines(name, stream string, r io.Reader, b *bus.Bus) {

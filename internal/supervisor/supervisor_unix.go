@@ -5,35 +5,27 @@ package supervisor
 import (
 	"os/exec"
 	"syscall"
-	"time"
 )
 
 func platformSysProcAttr() *syscall.SysProcAttr {
-	// New process group so Stop can signal the whole tree (e.g. a
-	// `bash script.sh` wrapper and whatever it spawns), not just the
-	// direct child.
+	// New process group so signalGraceful/hardKill can target the whole
+	// tree (e.g. a `bash script.sh` wrapper and whatever it spawns), not
+	// just the direct child.
 	return &syscall.SysProcAttr{Setpgid: true}
 }
 
-func stopProcess(cmd *exec.Cmd, grace time.Duration) error {
-	if cmd.Process == nil {
-		return nil
-	}
-
+func pgidOf(cmd *exec.Cmd) int {
 	pgid, err := syscall.Getpgid(cmd.Process.Pid)
 	if err != nil {
-		pgid = cmd.Process.Pid
+		return cmd.Process.Pid
 	}
-	_ = syscall.Kill(-pgid, syscall.SIGTERM)
+	return pgid
+}
 
-	done := make(chan error, 1)
-	go func() { done <- cmd.Wait() }()
+func signalGraceful(cmd *exec.Cmd) {
+	_ = syscall.Kill(-pgidOf(cmd), syscall.SIGTERM)
+}
 
-	select {
-	case err := <-done:
-		return err
-	case <-time.After(grace):
-		_ = syscall.Kill(-pgid, syscall.SIGKILL)
-		return <-done
-	}
+func hardKill(cmd *exec.Cmd) error {
+	return syscall.Kill(-pgidOf(cmd), syscall.SIGKILL)
 }

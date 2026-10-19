@@ -167,13 +167,14 @@ function renderList() {
       row.appendChild(dot);
       row.appendChild(info);
 
-      if (svc.status === 'manual') {
+      if (svc.status !== 'pending' && svc.status !== 'blocked') {
+        const isManual = svc.status === 'manual';
         const btn = document.createElement('button');
         btn.className = 'trigger-btn';
-        btn.title = 'Trigger';
-        btn.setAttribute('aria-label', 'Trigger');
+        btn.title = isManual ? 'Trigger' : 'Restart';
+        btn.setAttribute('aria-label', isManual ? 'Trigger' : 'Restart');
         btn.innerHTML = RELOAD_ICON;
-        btn.onclick = (e) => { e.stopPropagation(); triggerService(svc.name); };
+        btn.onclick = (e) => { e.stopPropagation(); restartService(svc.name); };
         row.appendChild(btn);
       }
 
@@ -195,8 +196,8 @@ async function selectService(name) {
   scrollToBottom();
 }
 
-async function triggerService(name) {
-  await fetch('/api/services/' + encodeURIComponent(name) + '/trigger', { method: 'POST' });
+async function restartService(name) {
+  await fetch('/api/services/' + encodeURIComponent(name) + '/restart', { method: 'POST' });
 }
 
 function appendLogLine(entry) {

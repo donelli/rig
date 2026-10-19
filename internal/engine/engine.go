@@ -29,13 +29,18 @@ type Engine struct {
 	bus      *bus.Bus
 	sem      semaphore
 
-	mu         sync.RWMutex
-	statuses   map[string]Status
-	succeeded  map[string]bool
-	settled    map[string]chan struct{}
-	triggers   map[string]chan struct{}
-	triggerOne map[string]*sync.Once
-	processes  map[string]*supervisor.Process
+	mu              sync.RWMutex
+	statuses        map[string]Status
+	succeeded       map[string]bool
+	settled         map[string]chan struct{}
+	triggers        map[string]chan struct{}
+	triggerOne      map[string]*sync.Once
+	processes       map[string]*supervisor.Process
+	restartMu       map[string]*sync.Mutex // serializes start/stop per service, across the initial run and any Restart
+	intentionalStop map[string]bool        // set just before Restart stops a process, so its watcher doesn't report a false crash
+	rootCtx         context.Context        // set once Up() starts; Restart reuses it
+
+	wg sync.WaitGroup // tracks every long-lived per-service goroutine, including restarts
 
 	shuttingDown atomic.Bool
 }
@@ -54,17 +59,19 @@ func New(cfg *config.Config) (*Engine, error) {
 	}
 
 	e := &Engine{
-		cfg:        cfg,
-		graph:      g,
-		services:   services,
-		bus:        bus.New(),
-		sem:        newSemaphore(cfg.Settings.MaxParallelUpdates),
-		statuses:   make(map[string]Status, len(services)),
-		succeeded:  make(map[string]bool, len(services)),
-		settled:    make(map[string]chan struct{}, len(services)),
-		triggers:   make(map[string]chan struct{}, len(services)),
-		triggerOne: make(map[string]*sync.Once, len(services)),
-		processes:  make(map[string]*supervisor.Process, len(services)),
+		cfg:             cfg,
+		graph:           g,
+		services:        services,
+		bus:             bus.New(),
+		sem:             newSemaphore(cfg.Settings.MaxParallelUpdates),
+		statuses:        make(map[string]Status, len(services)),
+		succeeded:       make(map[string]bool, len(services)),
+		settled:         make(map[string]chan struct{}, len(services)),
+		triggers:        make(map[string]chan struct{}, len(services)),
+		triggerOne:      make(map[string]*sync.Once, len(services)),
+		processes:       make(map[string]*supervisor.Process, len(services)),
+		restartMu:       make(map[string]*sync.Mutex, len(services)),
+		intentionalStop: make(map[string]bool, len(services)),
 	}
 
 	for name := range services {
@@ -72,6 +79,7 @@ func New(cfg *config.Config) (*Engine, error) {
 		e.settled[name] = make(chan struct{})
 		e.triggers[name] = make(chan struct{})
 		e.triggerOne[name] = &sync.Once{}
+		e.restartMu[name] = &sync.Mutex{}
 	}
 
 	return e, nil
@@ -90,6 +98,59 @@ func (e *Engine) Trigger(name string) error {
 		return fmt.Errorf("unknown service %q", name)
 	}
 	once.Do(func() { close(ch) })
+	return nil
+}
+
+// Restart (re)starts a service outside of the normal dependency-wait flow:
+//   - manual (not yet triggered): delegates to Trigger — nothing is running
+//     yet, so there's nothing to stop.
+//   - pending/blocked: rejected — the service hasn't been scheduled to run
+//     yet (its depends_on hasn't settled), so starting it now would race
+//     with the scheduler eventually starting it itself.
+//   - anything else (starting/healthy/failed/stopped): stops the current
+//     process if one exists, then runs the service again from scratch.
+//
+// Concurrent calls (including a concurrent initial start) for the same
+// service are serialized via restartMu, so this is safe to call at any
+// point after Up() begins.
+func (e *Engine) Restart(name string) error {
+	e.mu.RLock()
+	_, ok := e.services[name]
+	status := e.statuses[name]
+	rootCtx := e.rootCtx
+	lock := e.restartMu[name]
+	e.mu.RUnlock()
+
+	if !ok {
+		return fmt.Errorf("unknown service %q", name)
+	}
+	if rootCtx == nil {
+		return fmt.Errorf("engine is not running")
+	}
+
+	switch status {
+	case StatusPending, StatusBlocked:
+		return fmt.Errorf("service %q has not started yet (status: %s)", name, status)
+	case StatusManual:
+		return e.Trigger(name)
+	}
+
+	lock.Lock()
+	defer lock.Unlock()
+
+	e.mu.Lock()
+	proc := e.processes[name]
+	delete(e.processes, name)
+	if proc != nil {
+		e.intentionalStop[name] = true
+	}
+	e.mu.Unlock()
+
+	if proc != nil {
+		_ = proc.Stop(defaultStopGrace)
+	}
+
+	e.startService(rootCtx, name)
 	return nil
 }
 
@@ -119,24 +180,31 @@ func (e *Engine) Status() []ServiceStatus {
 // then blocks until ctx is cancelled, at which point it stops all running
 // processes and returns.
 func (e *Engine) Up(ctx context.Context) error {
-	var wg sync.WaitGroup
+	e.mu.Lock()
+	e.rootCtx = ctx
+	e.mu.Unlock()
+
 	for _, name := range e.graph.Order() {
 		name := name
-		wg.Add(1)
+		e.wg.Add(1)
 		go func() {
-			defer wg.Done()
-			e.runService(ctx, &wg, name)
+			defer e.wg.Done()
+			e.runService(ctx, name)
 		}()
 	}
 
 	<-ctx.Done()
 	e.shuttingDown.Store(true)
 	e.stopAll()
-	wg.Wait()
+	e.wg.Wait()
 	return ctx.Err()
 }
 
-func (e *Engine) runService(ctx context.Context, wg *sync.WaitGroup, name string) {
+// runService waits on depends_on and (if applicable) a manual trigger, then
+// hands off to startService under this service's restart lock — the same
+// lock any later Restart call must also acquire, so the two can never run
+// concurrently for the same service.
+func (e *Engine) runService(ctx context.Context, name string) {
 	svc := e.services[name]
 	success := false
 	defer func() {
@@ -168,8 +236,24 @@ func (e *Engine) runService(ctx context.Context, wg *sync.WaitGroup, name string
 		}
 	}
 
+	e.mu.RLock()
+	lock := e.restartMu[name]
+	e.mu.RUnlock()
+
+	lock.Lock()
+	success = e.startService(ctx, name)
+	lock.Unlock()
+}
+
+// startService runs the service's command once: acquires the parallelism
+// semaphore, starts the process, waits for readiness (serve_cmd) or exit
+// (cmd), and reports the resulting status. Callers must hold this service's
+// restartMu. Returns whether it reached a successful terminal state.
+func (e *Engine) startService(ctx context.Context, name string) bool {
+	svc := e.services[name]
+
 	if err := e.sem.Acquire(ctx); err != nil {
-		return
+		return false
 	}
 	var semOnce sync.Once
 	releaseSem := func() { semOnce.Do(e.sem.Release) }
@@ -180,7 +264,7 @@ func (e *Engine) runService(ctx context.Context, wg *sync.WaitGroup, name string
 	argv, err := resource.SplitArgv(svc.Command())
 	if err != nil {
 		e.failf(name, "invalid command: %v", err)
-		return
+		return false
 	}
 
 	proc, err := supervisor.Start(supervisor.StartOptions{
@@ -192,7 +276,7 @@ func (e *Engine) runService(ctx context.Context, wg *sync.WaitGroup, name string
 	})
 	if err != nil {
 		e.failf(name, "failed to start: %v", err)
-		return
+		return false
 	}
 
 	e.mu.Lock()
@@ -205,40 +289,49 @@ func (e *Engine) runService(ctx context.Context, wg *sync.WaitGroup, name string
 			releaseSem()
 			if err != nil {
 				e.setStatus(name, StatusFailed)
-				return
+				return false
 			}
 		} else {
 			releaseSem()
 		}
 		e.setStatus(name, StatusHealthy)
-		success = true
 
-		wg.Add(1)
+		e.wg.Add(1)
 		go func() {
-			defer wg.Done()
+			defer e.wg.Done()
 			e.watchServe(name, proc)
 		}()
-		return
+		return true
 	}
 
 	// One-shot: the semaphore is held for the whole run, since the command
 	// itself is the unit of parallel-limited work.
 	if err := proc.Wait(); err != nil {
 		e.failf(name, "exited with error: %v", err)
-		return
+		return false
 	}
 	e.setStatus(name, StatusHealthy)
-	success = true
+	return true
 }
 
 func (e *Engine) watchServe(name string, proc *supervisor.Process) {
 	_ = proc.Wait()
+
+	e.mu.Lock()
+	intentional := e.intentionalStop[name]
+	delete(e.intentionalStop, name)
+	e.mu.Unlock()
+
 	if e.shuttingDown.Load() {
 		e.setStatus(name, StatusStopped)
 		return
 	}
-	// Crashed after having been healthy. No restart policy in v1 — surface
-	// it and let the operator decide (restart via CLI/TUI).
+	if intentional {
+		// Stopped on purpose by Restart, which starts a fresh process right
+		// after this — don't flag the expected exit as a crash.
+		return
+	}
+	// Crashed after having been healthy.
 	e.setStatus(name, StatusFailed)
 }
 
