@@ -30,6 +30,7 @@ var markerStatuses = map[string]bool{
 	string(engine.StatusStarting): true,
 	string(engine.StatusHealthy):  true,
 	string(engine.StatusFailed):   true,
+	string(engine.StatusStopping): true,
 	string(engine.StatusStopped):  true,
 }
 

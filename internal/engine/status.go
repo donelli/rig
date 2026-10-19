@@ -9,7 +9,8 @@ const (
 	StatusStarting Status = "starting" // process launched, not yet healthy (serve) or not yet exited (once)
 	StatusHealthy  Status = "healthy"  // serve: passed readiness; once: exited 0
 	StatusFailed   Status = "failed"
-	StatusStopped  Status = "stopped" // serve: exited after having been healthy (shutdown or crash-after-healthy)
+	StatusStopping Status = "stopping" // stop signal just sent (Stop/Restart); waiting for the process to actually exit
+	StatusStopped  Status = "stopped"  // serve: exited after having been healthy (shutdown or crash-after-healthy)
 )
 
 type ServiceStatus struct {

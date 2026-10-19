@@ -118,6 +118,7 @@
   .log-marker.marker-starting { color: #4f8cff; }
   .log-marker.marker-healthy  { color: #3ecf8e; }
   .log-marker.marker-failed   { color: #ff5c5c; }
+  .log-marker.marker-stopping { color: #d9a441; }
   .log-marker.marker-stopped  { color: #8b95a1; }
 
   .status-pending  { background: #4b525c; }
@@ -126,6 +127,7 @@
   .status-starting { background: #4f8cff; }
   .status-healthy  { background: #3ecf8e; }
   .status-failed   { background: #ff5c5c; }
+  .status-stopping { background: #d9a441; }
   .status-stopped  { background: #4b525c; }
 </style>
 </head>
@@ -257,6 +259,7 @@ const MARKER_LABEL = {
   starting: 'started',
   healthy:  'healthy',
   failed:   'failed',
+  stopping: 'stopping…',
   stopped:  'stopped',
 };
 

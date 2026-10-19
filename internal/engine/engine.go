@@ -147,6 +147,7 @@ func (e *Engine) Restart(name string) error {
 	e.mu.Unlock()
 
 	if proc != nil {
+		e.setStatus(name, StatusStopping)
 		_ = proc.Stop(defaultStopGrace)
 	}
 
@@ -192,6 +193,7 @@ func (e *Engine) Stop(name string) error {
 		return fmt.Errorf("service %q has no running process", name)
 	}
 
+	e.setStatus(name, StatusStopping)
 	_ = proc.Stop(defaultStopGrace)
 	e.setStatus(name, StatusStopped)
 	return nil
