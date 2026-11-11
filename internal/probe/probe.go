@@ -5,16 +5,24 @@ package probe
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
 	"os/exec"
+	"strconv"
 	"time"
 )
 
 type Checker interface {
 	Check(ctx context.Context) error
 }
+
+// loopbackHosts are tried in order by the HTTP and TCP probes. Some dev
+// servers listen only on IPv6 localhost (Vite on macOS binds [::1] when
+// "localhost" resolves there first), so checking 127.0.0.1 alone would never
+// see them come up.
+var loopbackHosts = []string{"127.0.0.1", "::1"}
 
 type HTTP struct {
 	Port int
@@ -26,20 +34,27 @@ func (h HTTP) Check(ctx context.Context) error {
 	if path == "" {
 		path = "/"
 	}
-	url := fmt.Sprintf("http://127.0.0.1:%d%s", h.Port, path)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return err
+	var errs []error
+	for _, host := range loopbackHosts {
+		url := "http://" + net.JoinHostPort(host, strconv.Itoa(h.Port)) + path
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		if err != nil {
+			return err
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			// Nothing answering on this address; try the next one
+			errs = append(errs, err)
+			continue
+		}
+		resp.Body.Close()
+		// A server answered, so its status is the verdict
+		if resp.StatusCode >= 400 {
+			return fmt.Errorf("http probe %s: status %d", url, resp.StatusCode)
+		}
+		return nil
 	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 400 {
-		return fmt.Errorf("http probe %s: status %d", url, resp.StatusCode)
-	}
-	return nil
+	return errors.Join(errs...)
 }
 
 type TCP struct {
@@ -48,11 +63,16 @@ type TCP struct {
 
 func (t TCP) Check(ctx context.Context) error {
 	var d net.Dialer
-	conn, err := d.DialContext(ctx, "tcp", fmt.Sprintf("127.0.0.1:%d", t.Port))
-	if err != nil {
-		return err
+	var errs []error
+	for _, host := range loopbackHosts {
+		conn, err := d.DialContext(ctx, "tcp", net.JoinHostPort(host, strconv.Itoa(t.Port)))
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		return conn.Close()
 	}
-	return conn.Close()
+	return errors.Join(errs...)
 }
 
 type Exec struct {

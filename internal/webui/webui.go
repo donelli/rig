@@ -23,6 +23,10 @@ var staticFS embed.FS
 
 const maxLogLines = 2000
 
+// maxAllLogLines caps the combined buffer behind the "All" view, which
+// interleaves every service's lines in arrival order.
+const maxAllLogLines = 5000
+
 // markerStatuses are the status transitions worth a visible marker line in
 // the log view — the ones that mean "a process just started or stopped,"
 // as opposed to scheduling states like pending/blocked/manual.
@@ -35,10 +39,11 @@ var markerStatuses = map[string]bool{
 }
 
 type LogLine struct {
-	Time   time.Time `json:"time"`
-	Stream string    `json:"stream,omitempty"`
-	Line   string    `json:"line,omitempty"`
-	Marker string    `json:"marker,omitempty"` // status name; set instead of Stream/Line for a lifecycle marker
+	Time    time.Time `json:"time"`
+	Service string    `json:"service,omitempty"` // set only in the combined /api/logs response
+	Stream  string    `json:"stream,omitempty"`
+	Line    string    `json:"line,omitempty"`
+	Marker  string    `json:"marker,omitempty"` // status name; set instead of Stream/Line for a lifecycle marker
 }
 
 type Server struct {
@@ -46,6 +51,7 @@ type Server struct {
 
 	mu   sync.RWMutex
 	logs map[string][]LogLine
+	all  []LogLine // every service's lines, in arrival order
 }
 
 func New(e *engine.Engine) *Server {
@@ -80,6 +86,7 @@ func (s *Server) Run(ctx context.Context, addr string) error {
 	mux.HandleFunc("/", s.handleIndex)
 	mux.HandleFunc("/api/services", s.handleServices)
 	mux.HandleFunc("/api/services/", s.handleServiceSub)
+	mux.HandleFunc("/api/logs", s.handleAllLogs)
 	mux.HandleFunc("/api/stream", s.handleStream)
 
 	srv := &http.Server{Addr: addr, Handler: mux}
@@ -109,6 +116,12 @@ func (s *Server) appendLog(service string, line LogLine) {
 		lines = lines[len(lines)-maxLogLines:]
 	}
 	s.logs[service] = lines
+
+	line.Service = service
+	s.all = append(s.all, line)
+	if len(s.all) > maxAllLogLines {
+		s.all = s.all[len(s.all)-maxAllLogLines:]
+	}
 }
 
 func (s *Server) getLogs(service string) []LogLine {
@@ -116,6 +129,39 @@ func (s *Server) getLogs(service string) []LogLine {
 	defer s.mu.RUnlock()
 	out := make([]LogLine, len(s.logs[service]))
 	copy(out, s.logs[service])
+	return out
+}
+
+// clearLogs drops one service's buffered lines, including its lines in the
+// combined buffer.
+func (s *Server) clearLogs(service string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.logs, service)
+	kept := s.all[:0]
+	for _, l := range s.all {
+		if l.Service != service {
+			kept = append(kept, l)
+		}
+	}
+	// Zero the tail so the dropped lines can be garbage collected
+	clear(s.all[len(kept):])
+	s.all = kept
+}
+
+// clearAllLogs drops every buffered line.
+func (s *Server) clearAllLogs() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.logs = make(map[string][]LogLine)
+	s.all = nil
+}
+
+func (s *Server) getAllLogs() []LogLine {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]LogLine, len(s.all))
+	copy(out, s.all)
 	return out
 }
 
@@ -137,7 +183,22 @@ func (s *Server) handleServices(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, s.engine.Status())
 }
 
-// handleServiceSub handles /api/services/{name}/logs (GET) and
+// handleAllLogs serves the combined log history of every service (GET), or
+// clears every service's history (DELETE).
+func (s *Server) handleAllLogs(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, s.getAllLogs())
+	case http.MethodDelete:
+		s.clearAllLogs()
+		w.WriteHeader(http.StatusNoContent)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// handleServiceSub handles /api/services/{name}/logs (GET, or DELETE to
+// clear them) and
 // /api/services/{name}/{trigger,restart,stop} (POST).
 func (s *Server) handleServiceSub(w http.ResponseWriter, r *http.Request) {
 	rest := strings.TrimPrefix(r.URL.Path, "/api/services/")
@@ -150,11 +211,15 @@ func (s *Server) handleServiceSub(w http.ResponseWriter, r *http.Request) {
 
 	switch action {
 	case "logs":
-		if r.Method != http.MethodGet {
+		switch r.Method {
+		case http.MethodGet:
+			writeJSON(w, s.getLogs(name))
+		case http.MethodDelete:
+			s.clearLogs(name)
+			w.WriteHeader(http.StatusNoContent)
+		default:
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
 		}
-		writeJSON(w, s.getLogs(name))
 	case "trigger":
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)

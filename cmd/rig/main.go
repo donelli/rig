@@ -58,6 +58,8 @@ Commands:
 Flags for "up":
   -addr string    address for the web dashboard (default ":7190")
   -no-ui          disable the web dashboard
+  -logs           also print every log line and status change in the terminal
+                  (always on with -no-ui; otherwise only failures are printed)
 
 Config file defaults to ./rig.yaml.`)
 }
@@ -141,6 +143,7 @@ func runUp(args []string) {
 	fs := flag.NewFlagSet("up", flag.ExitOnError)
 	addr := fs.String("addr", ":7190", "address for the web dashboard")
 	noUI := fs.Bool("no-ui", false, "disable the web dashboard")
+	logs := fs.Bool("logs", false, "also print every log line and status change in the terminal")
 	_ = fs.Parse(args)
 
 	path, only := splitArgs(fs.Args())
@@ -169,7 +172,8 @@ func runUp(args []string) {
 		cancel()
 	}()
 
-	go printEvents(e)
+	// With the dashboard on, logs live there; the terminal only flags failures
+	go printEvents(e, *noUI || *logs)
 	go readStdinCommands(e, cancel)
 
 	if !*noUI {
@@ -179,7 +183,11 @@ func runUp(args []string) {
 				fmt.Fprintf(os.Stderr, "web ui: %v\n", err)
 			}
 		}()
-		fmt.Printf("dashboard:  http://localhost%s\n", *addr)
+		host := *addr
+		if strings.HasPrefix(host, ":") {
+			host = "localhost" + host
+		}
+		fmt.Printf("dashboard:  http://%s\n", host)
 	}
 
 	fmt.Printf("rig: %d services loaded from %s\n", len(cfg.Services), path)
@@ -190,14 +198,16 @@ func runUp(args []string) {
 	}
 }
 
-func printEvents(e *engine.Engine) {
+// printEvents prints the event stream: everything when verbose, otherwise
+// only services that fail.
+func printEvents(e *engine.Engine, verbose bool) {
 	ch, unsubscribe := e.Bus().Subscribe()
 	defer unsubscribe()
 	for ev := range ch {
-		switch ev.Type {
-		case bus.EventStatus:
+		switch {
+		case ev.Type == bus.EventStatus && (verbose || ev.Status == string(engine.StatusFailed)):
 			fmt.Printf("[%s] %s\n", ev.Service, ev.Status)
-		case bus.EventLog:
+		case ev.Type == bus.EventLog && verbose:
 			fmt.Printf("%-24s %s\n", ev.Service+":", ev.Line)
 		}
 	}

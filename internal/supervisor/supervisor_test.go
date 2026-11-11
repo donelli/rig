@@ -57,3 +57,18 @@ func TestStartAndStopTerminatesProcess(t *testing.T) {
 		t.Fatal("Wait after Stop hung — process may still be alive")
 	}
 }
+
+func TestTruncateLine(t *testing.T) {
+	short := []byte("hello")
+	if got := truncateLine(short); got != "hello" {
+		t.Errorf("short line changed: %q", got)
+	}
+	long := make([]byte, maxLineBytes+10)
+	for i := range long {
+		long[i] = 'x'
+	}
+	got := truncateLine(long)
+	if want := "… [10 more bytes]"; len(got) != maxLineBytes+len(want) || got[maxLineBytes:] != want {
+		t.Errorf("long line: got len %d, suffix %q", len(got), got[maxLineBytes:])
+	}
+}

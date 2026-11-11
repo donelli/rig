@@ -118,17 +118,33 @@ func (p *Process) Stop(grace time.Duration) error {
 	}
 }
 
+// maxLineBytes caps how much of one log line is kept. The dashboard buffers
+// thousands of lines per service, so a few huge lines (a minified bundle, a
+// JSON dump) would otherwise pin megabytes each.
+const maxLineBytes = 16 * 1024
+
 func streamLines(name, stream string, r io.Reader, b *bus.Bus) {
 	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+	// Start small and let the scanner grow the buffer only for long lines: a
+	// stack runs dozens of these readers (stdout + stderr per process).
+	scanner.Buffer(make([]byte, 0, 4*1024), 1024*1024)
 	for scanner.Scan() {
 		if b != nil {
 			b.Publish(bus.Event{
 				Type:    bus.EventLog,
 				Service: name,
 				Stream:  stream,
-				Line:    scanner.Text(),
+				Line:    truncateLine(scanner.Bytes()),
 			})
 		}
 	}
+}
+
+// truncateLine copies line into a string of at most maxLineBytes, noting how
+// much was cut.
+func truncateLine(line []byte) string {
+	if len(line) <= maxLineBytes {
+		return string(line)
+	}
+	return fmt.Sprintf("%s… [%d more bytes]", line[:maxLineBytes], len(line)-maxLineBytes)
 }

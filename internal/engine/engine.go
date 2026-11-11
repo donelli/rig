@@ -72,8 +72,14 @@ func New(cfg *config.Config) (*Engine, error) {
 		intentionalStop: make(map[string]bool, len(services)),
 	}
 
-	for name := range services {
-		e.statuses[name] = StatusPending
+	for name, svc := range services {
+		// A manual service shows as manual right away, even before its
+		// dependencies are ready: it won't start until it's triggered.
+		if svc.AutoInitEnabled() {
+			e.statuses[name] = StatusPending
+		} else {
+			e.statuses[name] = StatusManual
+		}
 		e.triggers[name] = make(chan struct{})
 		e.triggerOne[name] = &sync.Once{}
 		e.restartMu[name] = &sync.Mutex{}
@@ -85,16 +91,30 @@ func New(cfg *config.Config) (*Engine, error) {
 func (e *Engine) Bus() *bus.Bus { return e.bus }
 
 // Trigger fires a manual (auto_init: false) service that is waiting to
-// start. Safe to call multiple times; only the first call has an effect.
+// start, together with every manual service it depends on (directly or
+// not), so triggering a service starts everything it needs. Safe to call
+// multiple times; each service's trigger only fires once.
 func (e *Engine) Trigger(name string) error {
-	e.mu.RLock()
-	once, ok := e.triggerOne[name]
-	ch := e.triggers[name]
-	e.mu.RUnlock()
-	if !ok {
+	if _, ok := e.services[name]; !ok {
 		return fmt.Errorf("unknown service %q", name)
 	}
-	once.Do(func() { close(ch) })
+	seen := map[string]bool{}
+	var fire func(string)
+	fire = func(n string) {
+		if seen[n] {
+			return
+		}
+		seen[n] = true
+		e.mu.RLock()
+		once, ch := e.triggerOne[n], e.triggers[n]
+		e.mu.RUnlock()
+		// Harmless for auto-start services: nothing waits on their channel
+		once.Do(func() { close(ch) })
+		for _, dep := range e.services[n].DependsOn {
+			fire(dep)
+		}
+	}
+	fire(name)
 	return nil
 }
 
@@ -242,24 +262,27 @@ func (e *Engine) Up(ctx context.Context) error {
 	return ctx.Err()
 }
 
-// runService waits on depends_on and (if applicable) a manual trigger, then
-// hands off to startService under this service's restart lock — the same
+// runService waits for a manual trigger (if applicable), then on
+// depends_on, then hands off to startService under this service's restart lock — the same
 // lock any later Restart call must also acquire, so the two can never run
 // concurrently for the same service.
 func (e *Engine) runService(ctx context.Context, name string) {
 	svc := e.services[name]
 
-	if !e.waitForDeps(ctx, name, svc.DependsOn) {
-		return
-	}
-
+	// The trigger comes first, so a manual service stays "manual" until it's
+	// triggered, then goes through the same pending/blocked wait for its
+	// dependencies as any other service.
 	if !svc.AutoInitEnabled() {
-		e.setStatus(name, StatusManual)
 		select {
 		case <-e.triggerCh(name):
 		case <-ctx.Done():
 			return
 		}
+		e.setStatus(name, StatusPending)
+	}
+
+	if !e.waitForDeps(ctx, name, svc.DependsOn) {
+		return
 	}
 
 	e.mu.RLock()
@@ -274,16 +297,20 @@ func (e *Engine) runService(ctx context.Context, name string) {
 // waitForDeps blocks until every dependency is healthy. While one of them is
 // failed or blocked, the service shows as blocked, but it keeps waiting: once
 // the dependency is fixed and restarted, the service starts on its own.
-// Returns false if ctx is cancelled first.
+// While one is manual (not triggered yet), the service shows as manual too,
+// since it won't start until that one is triggered. Returns false if ctx is
+// cancelled first.
 func (e *Engine) waitForDeps(ctx context.Context, name string, deps []string) bool {
 	for {
 		e.mu.RLock()
-		ready, broken := true, false
+		ready, broken, manual := true, false, false
 		for _, dep := range deps {
 			switch e.statuses[dep] {
 			case StatusHealthy:
 			case StatusFailed, StatusBlocked:
 				ready, broken = false, true
+			case StatusManual:
+				ready, manual = false, true
 			default:
 				ready = false
 			}
@@ -295,10 +322,15 @@ func (e *Engine) waitForDeps(ctx context.Context, name string, deps []string) bo
 		if ready {
 			return true
 		}
-		if broken && current != StatusBlocked {
-			e.setStatus(name, StatusBlocked)
-		} else if !broken && current == StatusBlocked {
-			e.setStatus(name, StatusPending)
+		want := StatusPending
+		switch {
+		case broken:
+			want = StatusBlocked
+		case manual:
+			want = StatusManual
+		}
+		if current != want {
+			e.setStatus(name, want)
 		}
 
 		select {

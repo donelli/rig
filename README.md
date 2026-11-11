@@ -18,7 +18,9 @@ Implemented:
 - One-shot (`cmd`) and long-running (`serve_cmd`) services
 - `max_parallel_updates` — caps concurrent service startups
 - `auto_init: false` — manual services, started via `trigger <name>` in the
-  `up` REPL
+  `up` REPL or the dashboard. Triggering a service also triggers the manual
+  services it depends on, and a service waiting on an untriggered manual one
+  shows as manual too
 - Readiness probes: `http`, `tcp`, `exec`, with initial delay / period /
   timeout / success threshold
 - Process supervision: own process group, graceful stop (SIGTERM on
@@ -28,8 +30,11 @@ Implemented:
   probe passes
 - Recovery: a service blocked by a failed dependency starts on its own once
   that dependency is restarted and healthy
-- `rig check` / `rig up`, live log + status stream, minimal stdin
-  REPL (`ps`, `trigger <name>`, `restart <name>`, `stop <name>`, `quit`)
+- `rig check` / `rig up`, minimal stdin REPL (`ps`, `trigger <name>`,
+  `restart <name>`, `stop <name>`, `quit`)
+- Web dashboard on :7190 with live logs and status. While it's on, the
+  terminal only reports failures; `-logs` (or `-no-ui`) prints the full log
+  and status stream there too
 - `rig up rig.yaml api web` starts only the named services and their
   dependencies; everything else waits for `trigger <name>`
 
