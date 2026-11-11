@@ -31,8 +31,7 @@ type Engine struct {
 
 	mu              sync.RWMutex
 	statuses        map[string]Status
-	succeeded       map[string]bool
-	settled         map[string]chan struct{}
+	changed         chan struct{} // closed and replaced on every status change, so waiters can re-check
 	triggers        map[string]chan struct{}
 	triggerOne      map[string]*sync.Once
 	processes       map[string]*supervisor.Process
@@ -65,8 +64,7 @@ func New(cfg *config.Config) (*Engine, error) {
 		bus:             bus.New(),
 		sem:             newSemaphore(cfg.Settings.MaxParallelUpdates),
 		statuses:        make(map[string]Status, len(services)),
-		succeeded:       make(map[string]bool, len(services)),
-		settled:         make(map[string]chan struct{}, len(services)),
+		changed:         make(chan struct{}),
 		triggers:        make(map[string]chan struct{}, len(services)),
 		triggerOne:      make(map[string]*sync.Once, len(services)),
 		processes:       make(map[string]*supervisor.Process, len(services)),
@@ -76,7 +74,6 @@ func New(cfg *config.Config) (*Engine, error) {
 
 	for name := range services {
 		e.statuses[name] = StatusPending
-		e.settled[name] = make(chan struct{})
 		e.triggers[name] = make(chan struct{})
 		e.triggerOne[name] = &sync.Once{}
 		e.restartMu[name] = &sync.Mutex{}
@@ -251,25 +248,9 @@ func (e *Engine) Up(ctx context.Context) error {
 // concurrently for the same service.
 func (e *Engine) runService(ctx context.Context, name string) {
 	svc := e.services[name]
-	success := false
-	defer func() {
-		e.mu.Lock()
-		e.succeeded[name] = success
-		ch := e.settled[name]
-		e.mu.Unlock()
-		close(ch)
-	}()
 
-	for _, dep := range svc.DependsOn {
-		select {
-		case <-e.settledCh(dep):
-		case <-ctx.Done():
-			return
-		}
-		if !e.didSucceed(dep) {
-			e.setStatus(name, StatusBlocked)
-			return
-		}
+	if !e.waitForDeps(ctx, name, svc.DependsOn) {
+		return
 	}
 
 	if !svc.AutoInitEnabled() {
@@ -286,8 +267,46 @@ func (e *Engine) runService(ctx context.Context, name string) {
 	e.mu.RUnlock()
 
 	lock.Lock()
-	success = e.startService(ctx, name)
+	e.startService(ctx, name)
 	lock.Unlock()
+}
+
+// waitForDeps blocks until every dependency is healthy. While one of them is
+// failed or blocked, the service shows as blocked, but it keeps waiting: once
+// the dependency is fixed and restarted, the service starts on its own.
+// Returns false if ctx is cancelled first.
+func (e *Engine) waitForDeps(ctx context.Context, name string, deps []string) bool {
+	for {
+		e.mu.RLock()
+		ready, broken := true, false
+		for _, dep := range deps {
+			switch e.statuses[dep] {
+			case StatusHealthy:
+			case StatusFailed, StatusBlocked:
+				ready, broken = false, true
+			default:
+				ready = false
+			}
+		}
+		current := e.statuses[name]
+		changed := e.changed
+		e.mu.RUnlock()
+
+		if ready {
+			return true
+		}
+		if broken && current != StatusBlocked {
+			e.setStatus(name, StatusBlocked)
+		} else if !broken && current == StatusBlocked {
+			e.setStatus(name, StatusPending)
+		}
+
+		select {
+		case <-changed:
+		case <-ctx.Done():
+			return false
+		}
+	}
 }
 
 // startService runs the service's command once: acquires the parallelism
@@ -330,10 +349,36 @@ func (e *Engine) startService(ctx context.Context, name string) bool {
 
 	if svc.IsServe() {
 		if svc.Readiness != nil {
-			err := probe.Wait(ctx, readinessSpec(svc.Dir, *svc.Readiness))
+			// Give up on the probe as soon as the process exits: it can't
+			// become ready anymore (e.g. a script that bails out on a
+			// missing .env), and probing forever would hide that.
+			probeCtx, cancelProbe := context.WithCancel(ctx)
+			go func() {
+				select {
+				case <-proc.Done():
+					cancelProbe()
+				case <-probeCtx.Done():
+				}
+			}()
+			err := probe.Wait(probeCtx, readinessSpec(svc.Dir, *svc.Readiness))
+			cancelProbe()
 			releaseSem()
 			if err != nil {
-				e.setStatus(name, StatusFailed)
+				e.mu.Lock()
+				if e.processes[name] == proc {
+					delete(e.processes, name)
+				}
+				e.mu.Unlock()
+				switch {
+				case e.shuttingDown.Load() || ctx.Err() != nil:
+					_ = proc.Stop(defaultStopGrace)
+					e.setStatus(name, StatusStopped)
+				case proc.Exited():
+					e.failf(name, "exited before becoming ready: %v", exitDescription(proc.Wait()))
+				default:
+					_ = proc.Stop(defaultStopGrace)
+					e.failf(name, "readiness probe failed: %v", err)
+				}
 				return false
 			}
 		} else {
@@ -401,27 +446,17 @@ func (e *Engine) stopAll() {
 	wg.Wait()
 }
 
-func (e *Engine) settledCh(name string) chan struct{} {
-	e.mu.RLock()
-	defer e.mu.RUnlock()
-	return e.settled[name]
-}
-
 func (e *Engine) triggerCh(name string) chan struct{} {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	return e.triggers[name]
 }
 
-func (e *Engine) didSucceed(name string) bool {
-	e.mu.RLock()
-	defer e.mu.RUnlock()
-	return e.succeeded[name]
-}
-
 func (e *Engine) setStatus(name string, status Status) {
 	e.mu.Lock()
 	e.statuses[name] = status
+	close(e.changed)
+	e.changed = make(chan struct{})
 	e.mu.Unlock()
 	e.bus.Publish(bus.Event{Type: bus.EventStatus, Service: name, Status: string(status)})
 }
@@ -434,6 +469,13 @@ func (e *Engine) failf(name, format string, args ...any) {
 		Stream:  "rig",
 		Line:    fmt.Sprintf(format, args...),
 	})
+}
+
+func exitDescription(err error) string {
+	if err == nil {
+		return "exit status 0"
+	}
+	return err.Error()
 }
 
 func readinessSpec(dir string, r config.Readiness) probe.Spec {

@@ -78,6 +78,19 @@ func (p *Process) Wait() error {
 	return p.err
 }
 
+// Done is closed once the process has exited.
+func (p *Process) Done() <-chan struct{} { return p.done }
+
+// Exited reports whether the process has already exited.
+func (p *Process) Exited() bool {
+	select {
+	case <-p.done:
+		return true
+	default:
+		return false
+	}
+}
+
 func (p *Process) Pid() int {
 	if p.cmd.Process == nil {
 		return -1
