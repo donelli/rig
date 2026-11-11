@@ -1,7 +1,8 @@
 // Command rig loads a rig config file and runs its services.
 //
 // This is the v1 CLI: a single foreground process, plain-text log/status
-// output, and a tiny stdin REPL for `ps` / `trigger <name>` / `quit`. A
+// output, and a tiny stdin REPL for `ps` / `trigger` / `restart` / `stop` /
+// `quit`. A
 // bubbletea TUI is the planned replacement for the REPL, built on the same
 // engine.Bus() event stream used here.
 package main
@@ -48,7 +49,10 @@ func usage() {
 	fmt.Fprintln(os.Stderr, `rig <command> [flags] [config file]
 
 Commands:
-  up [flags] [rig.yaml]     load config and run all services
+  up [flags] [rig.yaml] [service...]
+                            load config and run all services. When services
+                            are named, only they and their dependencies start;
+                            the rest wait for "trigger <name>".
   check [rig.yaml]          validate config without running anything
 
 Flags for "up":
@@ -59,10 +63,59 @@ Config file defaults to ./rig.yaml.`)
 }
 
 func configPath(args []string) string {
+	path, _ := splitArgs(args)
+	return path
+}
+
+// splitArgs separates the optional config file (the first argument, when it
+// looks like a YAML file or exists on disk) from service names.
+func splitArgs(args []string) (string, []string) {
 	if len(args) > 0 {
-		return args[0]
+		first := args[0]
+		if strings.HasSuffix(first, ".yaml") || strings.HasSuffix(first, ".yml") {
+			return first, args[1:]
+		}
+		if info, err := os.Stat(first); err == nil && !info.IsDir() {
+			return first, args[1:]
+		}
 	}
-	return "rig.yaml"
+	return "rig.yaml", args
+}
+
+// limitTo makes every service outside the named ones and their transitive
+// depends_on manual, so `rig up rig.yaml api` starts just what api needs.
+func limitTo(cfg *config.Config, names []string) error {
+	byName := make(map[string]config.Service, len(cfg.Services))
+	for _, s := range cfg.Services {
+		byName[s.Name] = s
+	}
+	keep := map[string]bool{}
+	var visit func(string)
+	visit = func(name string) {
+		if keep[name] {
+			return
+		}
+		keep[name] = true
+		for _, dep := range byName[name].DependsOn {
+			visit(dep)
+		}
+	}
+	for _, name := range names {
+		if _, ok := byName[name]; !ok {
+			return fmt.Errorf("unknown service %q", name)
+		}
+		visit(name)
+	}
+	manual := false
+	for i := range cfg.Services {
+		if keep[cfg.Services[i].Name] {
+			// Asking for a service by name starts it even if it's manual
+			cfg.Services[i].AutoInit = nil
+		} else {
+			cfg.Services[i].AutoInit = &manual
+		}
+	}
+	return nil
 }
 
 func loadOrDie(path string) *config.Config {
@@ -90,8 +143,14 @@ func runUp(args []string) {
 	noUI := fs.Bool("no-ui", false, "disable the web dashboard")
 	_ = fs.Parse(args)
 
-	path := configPath(fs.Args())
+	path, only := splitArgs(fs.Args())
 	cfg := loadOrDie(path)
+	if len(only) > 0 {
+		if err := limitTo(cfg, only); err != nil {
+			fmt.Fprintf(os.Stderr, "%v\n", err)
+			os.Exit(1)
+		}
+	}
 
 	e, err := engine.New(cfg)
 	if err != nil {
@@ -124,7 +183,7 @@ func runUp(args []string) {
 	}
 
 	fmt.Printf("rig: %d services loaded from %s\n", len(cfg.Services), path)
-	fmt.Println(`type "ps", "trigger <name>", or "quit"`)
+	fmt.Println(`type "ps", "trigger <name>", "restart <name>", "stop <name>", or "quit"`)
 
 	if err := e.Up(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		fmt.Fprintf(os.Stderr, "up: %v\n", err)
@@ -161,6 +220,21 @@ func readStdinCommands(e *engine.Engine, cancel context.CancelFunc) {
 			if err := e.Trigger(name); err != nil {
 				fmt.Println(err)
 			}
+		case strings.HasPrefix(line, "restart "):
+			name := strings.TrimSpace(strings.TrimPrefix(line, "restart "))
+			// Restart blocks until the service is up again; keep the REPL free
+			go func() {
+				if err := e.Restart(name); err != nil {
+					fmt.Println(err)
+				}
+			}()
+		case strings.HasPrefix(line, "stop "):
+			name := strings.TrimSpace(strings.TrimPrefix(line, "stop "))
+			go func() {
+				if err := e.Stop(name); err != nil {
+					fmt.Println(err)
+				}
+			}()
 		default:
 			fmt.Printf("unknown command: %q\n", line)
 		}
