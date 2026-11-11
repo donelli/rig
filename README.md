@@ -24,9 +24,14 @@ Implemented:
 - Process supervision: own process group, graceful stop (SIGTERM on
   Unix / CTRL_BREAK_EVENT on Windows) → grace period → hard kill (SIGKILL /
   TerminateProcess) on shutdown, crash detection after a service goes
-  healthy
+  healthy, and failure as soon as a process exits before its readiness
+  probe passes
+- Recovery: a service blocked by a failed dependency starts on its own once
+  that dependency is restarted and healthy
 - `rig check` / `rig up`, live log + status stream, minimal stdin
-  REPL (`ps`, `trigger <name>`, `quit`)
+  REPL (`ps`, `trigger <name>`, `restart <name>`, `stop <name>`, `quit`)
+- `rig up rig.yaml api web` starts only the named services and their
+  dependencies; everything else waits for `trigger <name>`
 
 Not yet implemented (see Roadmap):
 - File-watch-triggered re-run/restart (`deps: [...]` is parsed but inert)
@@ -48,6 +53,7 @@ engine is platform-independent.
 go mod tidy
 go run ./cmd/rig check examples/rig.yaml
 go run ./cmd/rig up examples/rig.yaml
+go run ./cmd/rig up examples/rig.yaml frontend   # frontend + its dependencies only
 ```
 
 ## Config reference
