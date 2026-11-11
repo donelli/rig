@@ -350,3 +350,111 @@ func statusOf(t *testing.T, statuses []ServiceStatus, name string) Status {
 	t.Fatalf("no status found for service %q", name)
 	return ""
 }
+
+// TestManualShowsManualBeforeDepsReady checks that a manual service reports
+// "manual" while its dependency is still starting (not "pending"), moves to
+// "pending" once triggered, and starts when the dependency becomes healthy.
+func TestManualShowsManualBeforeDepsReady(t *testing.T) {
+	manual := false
+	cfg := &config.Config{
+		Settings: config.Settings{MaxParallelUpdates: 5},
+		Services: []config.Service{
+			{
+				Name:     "dep",
+				ServeCmd: longRunningCmd(),
+				Readiness: &config.Readiness{
+					Exec:             &config.ExecProbe{Cmd: trivialOKArgv()},
+					InitialDelay:     config.Duration(1500 * time.Millisecond),
+					Period:           config.Duration(200 * time.Millisecond),
+					Timeout:          config.Duration(500 * time.Millisecond),
+					SuccessThreshold: 1,
+				},
+			},
+			{Name: "m", Cmd: trivialOKCmd(), DependsOn: []string{"dep"}, AutoInit: &manual},
+		},
+	}
+
+	e, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if got := statusOf(t, e.Status(), "m"); got != StatusManual {
+		t.Fatalf("before Up: m is %q, want %q", got, StatusManual)
+	}
+
+	ch, unsubscribe := e.Bus().Subscribe()
+	defer unsubscribe()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_ = e.Up(ctx)
+	}()
+
+	waitForStatus(t, ch, "dep", StatusStarting, 5*time.Second)
+	if got := statusOf(t, e.Status(), "m"); got != StatusManual {
+		t.Fatalf("while dep is starting: m is %q, want %q", got, StatusManual)
+	}
+
+	if err := e.Trigger("m"); err != nil {
+		t.Fatalf("Trigger: %v", err)
+	}
+	waitForStatus(t, ch, "m", StatusPending, 2*time.Second)
+	if got := statusOf(t, e.Status(), "dep"); got == StatusHealthy {
+		t.Fatalf("dep became healthy too early for this test to mean anything")
+	}
+
+	waitForStatus(t, ch, "m", StatusHealthy, 5*time.Second)
+
+	cancel()
+	wg.Wait()
+}
+
+// TestWaitingOnManualShowsManual mirrors android -> android-logs: an
+// auto-start service whose dependency is manual shows as manual (not
+// pending), and triggering it also triggers that dependency.
+func TestWaitingOnManualShowsManual(t *testing.T) {
+	manual := false
+	cfg := &config.Config{
+		Settings: config.Settings{MaxParallelUpdates: 5},
+		Services: []config.Service{
+			{Name: "m", Cmd: trivialOKCmd(), AutoInit: &manual},
+			{Name: "logs", Cmd: trivialOKCmd(), DependsOn: []string{"m"}},
+		},
+	}
+
+	e, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ch, unsubscribe := e.Bus().Subscribe()
+	defer unsubscribe()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_ = e.Up(ctx)
+	}()
+
+	waitForStatus(t, ch, "logs", StatusManual, 2*time.Second)
+
+	// What the dashboard's play button calls for a manual-status service
+	if err := e.Restart("logs"); err != nil {
+		t.Fatalf("Restart(logs): %v", err)
+	}
+	waitForStatus(t, ch, "logs", StatusHealthy, 5*time.Second)
+	if got := statusOf(t, e.Status(), "m"); got != StatusHealthy {
+		t.Fatalf("m is %q after triggering logs, want healthy", got)
+	}
+
+	cancel()
+	wg.Wait()
+}

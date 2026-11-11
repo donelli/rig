@@ -5,7 +5,7 @@ type Status string
 const (
 	StatusPending  Status = "pending"  // not yet scheduled
 	StatusBlocked  Status = "blocked"  // a dependency failed; starts once that dependency is healthy again
-	StatusManual   Status = "manual"   // auto_init: false, waiting to be triggered
+	StatusManual   Status = "manual"   // auto_init: false, not triggered yet (whether or not its dependencies are ready)
 	StatusStarting Status = "starting" // process launched, not yet healthy (serve) or not yet exited (once)
 	StatusHealthy  Status = "healthy"  // serve: passed readiness; once: exited 0
 	StatusFailed   Status = "failed"
