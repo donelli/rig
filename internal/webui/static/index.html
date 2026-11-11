@@ -41,6 +41,19 @@
     color: #4b525c;
   }
   .group-header:first-of-type { padding-top: 4px; }
+  .group-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+    user-select: none;
+  }
+  .group-header:hover { color: #8b95a1; }
+  .group-header .chevron { width: 9px; height: 9px; transition: transform 0.12s; }
+  .group-header.collapsed .chevron { transform: rotate(-90deg); }
+  .group-header .group-count { margin-left: auto; font-weight: 400; letter-spacing: 0; }
+  .group-header .group-dots { display: flex; gap: 3px; }
+  .group-header .group-dots .dot { width: 6px; height: 6px; }
   .service {
     display: flex;
     align-items: center;
@@ -61,8 +74,29 @@
     text-overflow: ellipsis;
   }
   .service-status { font-size: 11px; color: #6b7684; text-transform: capitalize; }
+  #all-row { margin-top: 4px; }
+  #all-row .dot { background: #8b95a1; }
 
-  #main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  #main { flex: 1; display: flex; flex-direction: column; min-width: 0; position: relative; }
+  #jump-latest {
+    position: absolute;
+    right: 24px;
+    bottom: 18px;
+    display: none;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 12px;
+    border-radius: 14px;
+    border: 1px solid #2f3742;
+    background: #1d232b;
+    color: #a9b2bc;
+    font: inherit;
+    font-size: 12px;
+    cursor: pointer;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+  }
+  #jump-latest:hover { color: #4f8cff; border-color: #4f8cff; }
+  #jump-latest.visible { display: flex; }
   #terminal-header {
     padding: 11px 16px 11px 20px;
     border-bottom: 1px solid #262c33;
@@ -74,6 +108,28 @@
     gap: 10px;
   }
   #header-actions { display: flex; align-items: center; gap: 2px; }
+  #header-right { display: flex; align-items: center; gap: 10px; }
+  #search-wrap { position: relative; display: flex; align-items: center; }
+  #search {
+    width: 220px;
+    padding: 5px 52px 5px 9px;
+    border-radius: 5px;
+    border: 1px solid #262c33;
+    background: #111418;
+    color: #d8dee4;
+    font: inherit;
+    font-size: 12px;
+  }
+  #search:focus { outline: none; border-color: #4f8cff; }
+  #search-count {
+    position: absolute;
+    right: 9px;
+    font-size: 11px;
+    color: #6b7684;
+    pointer-events: none;
+  }
+  .hidden-by-search { display: none !important; }
+  mark { background: #5a4a1a; color: inherit; border-radius: 2px; }
   .icon-btn {
     width: 26px;
     height: 26px;
@@ -99,9 +155,22 @@
     font-size: 12.5px;
     line-height: 1.6;
   }
-  .log-line { display: flex; gap: 10px; white-space: pre-wrap; word-break: break-all; }
+  /* padding-left matches .log-marker's 2px bar + 8px padding, so the
+     timestamps of log lines and lifecycle markers line up */
+  .log-line { display: flex; gap: 10px; padding-left: 10px; white-space: pre-wrap; word-break: break-all; }
   .log-line .ts { color: #4b525c; flex-shrink: 0; }
   .log-line .text.stderr { color: #ff8080; }
+  .svc-tag {
+    flex-shrink: 0;
+    width: 18ch;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-style: normal;
+    font-weight: 400;
+    cursor: pointer;
+  }
+  .svc-tag:hover { text-decoration: underline; }
   .empty-state { color: #4b525c; padding: 4px 0; }
 
   .log-marker {
@@ -121,9 +190,9 @@
   .log-marker.marker-stopping { color: #d9a441; }
   .log-marker.marker-stopped  { color: #8b95a1; }
 
-  .status-pending  { background: #4b525c; }
+  .status-pending  { background: #d9a441; }
   .status-blocked  { background: #8a4a4a; }
-  .status-manual   { background: #d9a441; }
+  .status-manual   { background: #6b7684; }
   .status-starting { background: #4f8cff; }
   .status-healthy  { background: #3ecf8e; }
   .status-failed   { background: #ff5c5c; }
@@ -134,34 +203,138 @@
 <body>
   <div id="sidebar">
     <h1>rig</h1>
+    <div id="all-row" class="service">
+      <div class="dot"></div>
+      <div class="service-info">
+        <div class="service-name">All</div>
+        <div class="service-status">every service</div>
+      </div>
+    </div>
     <div id="service-list"></div>
   </div>
   <div id="main">
     <div id="terminal-header">
       <div id="header-title">Select a service</div>
-      <div id="header-actions"></div>
+      <div id="header-right">
+        <div id="search-wrap">
+          <input id="search" type="text" placeholder="Search logs  /" autocomplete="off" spellcheck="false">
+          <span id="search-count"></span>
+        </div>
+        <div id="header-actions"></div>
+      </div>
     </div>
     <div id="terminal"><div class="empty-state">No service selected.</div></div>
+    <button id="jump-latest" type="button">↓ Jump to latest</button>
   </div>
 
 <script>
 const RELOAD_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>';
 const STOP_ICON = '<svg viewBox="0 0 24 24" fill="currentColor"><rect x="5" y="5" width="14" height="14" rx="2"></rect></svg>';
+const CLEAR_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"></path><path d="M10 11v6M14 11v6"></path><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"></path></svg>';
 const PLAY_ICON = '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"></path></svg>';
+
+// ALL is the sidebar's "All" entry. A Symbol can't collide with a service name.
+const ALL = Symbol('all');
+// Each view keeps at most this many lines in the DOM, so a tab left open on a
+// chatty service doesn't grow forever.
+const MAX_DOM_LINES = 5000;
 
 let services = {};
 let selected = null;
+
+// Collapsed sidebar groups, remembered per browser.
+const COLLAPSED_KEY = 'rig.collapsedGroups';
+let collapsedGroups = new Set();
+try { collapsedGroups = new Set(JSON.parse(localStorage.getItem(COLLAPSED_KEY) || '[]')); } catch (e) {}
+
+function toggleGroup(label) {
+  if (collapsedGroups.has(label)) collapsedGroups.delete(label);
+  else collapsedGroups.add(label);
+  try { localStorage.setItem(COLLAPSED_KEY, JSON.stringify([...collapsedGroups])); } catch (e) {}
+  renderList();
+}
+
+const CHEVRON_ICON = '<svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>';
 
 const listEl = document.getElementById('service-list');
 const termEl = document.getElementById('terminal');
 const titleEl = document.getElementById('header-title');
 const actionsEl = document.getElementById('header-actions');
+const allRowEl = document.getElementById('all-row');
+const searchEl = document.getElementById('search');
+const searchCountEl = document.getElementById('search-count');
+
+// Client-side search: hides log rows (and lifecycle markers) that don't
+// contain the query, case-insensitive, and highlights the matches. The query
+// stays when switching views, and new rows are filtered as they arrive.
+let query = '';
+
+function applySearch(row) {
+  const text = row.querySelector('.text');
+  if (text) {
+    const raw = text.dataset.raw;
+    if (!query) {
+      text.textContent = raw;
+    } else {
+      const lower = raw.toLowerCase();
+      let html = '', i = 0, j;
+      while ((j = lower.indexOf(query, i)) !== -1) {
+        html += escapeHtml(raw.slice(i, j)) + '<mark>' + escapeHtml(raw.slice(j, j + query.length)) + '</mark>';
+        i = j + query.length;
+      }
+      text.innerHTML = html + escapeHtml(raw.slice(i));
+    }
+  }
+  const match = !query || row.textContent.toLowerCase().includes(query);
+  row.classList.toggle('hidden-by-search', !match);
+  return match;
+}
+
+// Counting walks every row, so it runs at most once per frame even when
+// lines stream in quickly.
+let countPending = false;
+function updateSearchCount() {
+  if (countPending) return;
+  countPending = true;
+  requestAnimationFrame(() => { countPending = false; renderSearchCount(); });
+}
+
+function renderSearchCount() {
+  if (!query) { searchCountEl.textContent = ''; return; }
+  const n = termEl.querySelectorAll('.log-line:not(.hidden-by-search), .log-marker:not(.hidden-by-search)').length;
+  searchCountEl.textContent = n + (n === 1 ? ' hit' : ' hits');
+}
+
+function runSearch() {
+  query = searchEl.value.trim().toLowerCase();
+  termEl.querySelectorAll('.log-line, .log-marker').forEach(applySearch);
+  updateSearchCount();
+  scrollToBottom();
+}
+
+searchEl.addEventListener('input', runSearch);
+searchEl.addEventListener('keydown', (ev) => {
+  if (ev.key === 'Escape') { searchEl.value = ''; runSearch(); searchEl.blur(); }
+});
+// "/" focuses the search, like in many log viewers
+document.addEventListener('keydown', (ev) => {
+  if (ev.key === '/' && document.activeElement !== searchEl) { ev.preventDefault(); searchEl.focus(); searchEl.select(); }
+});
+allRowEl.onclick = () => selectService(ALL);
 
 function escapeHtml(s) {
   return s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 
+// serviceColor gives each service a stable color for its tag in the All view.
+function serviceColor(name) {
+  let h = 0;
+  for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) >>> 0;
+  return 'hsl(' + (h % 360) + ', 65%, 68%)';
+}
+
 function renderList() {
+  allRowEl.classList.toggle('selected', selected === ALL);
   listEl.innerHTML = '';
 
   const groups = new Map(); // first label (or "ungrouped") -> [svc, ...]
@@ -172,10 +345,27 @@ function renderList() {
   });
 
   groups.forEach((list, label) => {
+    const collapsed = collapsedGroups.has(label);
     const header = document.createElement('div');
-    header.className = 'group-header';
-    header.textContent = label;
+    header.className = 'group-header' + (collapsed ? ' collapsed' : '');
+    header.title = collapsed ? 'Expand' : 'Collapse';
+    header.onclick = () => toggleGroup(label);
+    header.innerHTML = CHEVRON_ICON + '<span>' + escapeHtml(label) + '</span>';
+    // Folded groups keep a dot per service, so a failure still shows.
+    if (collapsed) {
+      const dots = document.createElement('span');
+      dots.className = 'group-dots';
+      list.forEach(svc => {
+        const d = document.createElement('span');
+        d.className = 'dot status-' + svc.status;
+        d.title = svc.name + ': ' + svc.status;
+        dots.appendChild(d);
+      });
+      header.appendChild(dots);
+    }
+    header.insertAdjacentHTML('beforeend', '<span class="group-count">' + list.length + '</span>');
     listEl.appendChild(header);
+    if (collapsed) return;
 
     list.forEach(svc => {
       const row = document.createElement('div');
@@ -199,17 +389,39 @@ function renderList() {
   });
 }
 
+// The open view lives in the URL hash (#/all or #/service/<name>), so a
+// reload or a shared link opens the same view.
+function viewFromHash() {
+  const h = location.hash;
+  if (h === '#/all') return ALL;
+  if (h.startsWith('#/service/')) {
+    try { return decodeURIComponent(h.slice('#/service/'.length)); } catch (e) {}
+  }
+  return null;
+}
+
+function hashFor(name) {
+  return name === ALL ? '#/all' : '#/service/' + encodeURIComponent(name);
+}
+
 async function selectService(name) {
   selected = name;
-  titleEl.textContent = name;
+  if (location.hash !== hashFor(name)) history.replaceState(null, '', hashFor(name));
+  titleEl.textContent = name === ALL ? 'All services' : name;
   renderList();
   renderHeaderActions();
   termEl.innerHTML = '';
   try {
-    const res = await fetch('/api/services/' + encodeURIComponent(name) + '/logs');
+    const url = name === ALL
+      ? '/api/logs'
+      : '/api/services/' + encodeURIComponent(name) + '/logs';
+    const res = await fetch(url);
     const lines = await res.json();
+    // A quicker click on another entry wins over this slower fetch.
+    if (selected !== name) return;
     (lines || []).forEach(appendLogLine);
   } catch (e) {}
+  updateSearchCount();
   scrollToBottom();
 }
 
@@ -225,8 +437,13 @@ function iconButton(iconSvg, title, extraClass, onClick) {
 
 function renderHeaderActions() {
   actionsEl.innerHTML = '';
+  if (selected === ALL) {
+    actionsEl.appendChild(iconButton(CLEAR_ICON, 'Clear all logs', '', clearLogs));
+    return;
+  }
   const svc = selected ? services[selected] : null;
   if (!svc) return;
+  actionsEl.appendChild(iconButton(CLEAR_ICON, 'Clear logs', '', clearLogs));
 
   switch (svc.status) {
     case 'starting':
@@ -247,6 +464,24 @@ function renderHeaderActions() {
   }
 }
 
+// clearLogs empties the open view, here and in rig's buffer, so a reload
+// doesn't bring the lines back. Clearing one service also drops its lines
+// from All; clearing All empties every service.
+async function clearLogs() {
+  const view = selected;
+  const url = view === ALL
+    ? '/api/logs'
+    : '/api/services/' + encodeURIComponent(view) + '/logs';
+  try {
+    const res = await fetch(url, { method: 'DELETE' });
+    if (!res.ok) return;
+  } catch (e) { return; }
+  if (selected !== view) return;
+  termEl.innerHTML = '<div class="empty-state">Logs cleared.</div>';
+  updateSearchCount();
+  scrollToBottom();
+}
+
 async function restartService(name) {
   await fetch('/api/services/' + encodeURIComponent(name) + '/restart', { method: 'POST' });
 }
@@ -263,37 +498,91 @@ const MARKER_LABEL = {
   stopped:  'stopped',
 };
 
+// entry.service is set only in the All view; it adds a colored service tag
+// that opens that service's own view when clicked.
 function appendLogLine(entry) {
   if (entry.marker) {
-    appendMarkerLine(entry.marker, entry.time);
+    appendMarkerLine(entry.marker, entry.time, entry.service);
     return;
   }
-  const empty = termEl.querySelector('.empty-state');
-  if (empty) empty.remove();
   const row = document.createElement('div');
   row.className = 'log-line';
   const ts = new Date(entry.time).toLocaleTimeString();
   const textClass = entry.stream === 'stderr' ? 'text stderr' : 'text';
-  row.innerHTML =
-    '<span class="ts">' + ts + '</span>' +
-    '<span class="' + textClass + '">' + escapeHtml(entry.line) + '</span>';
-  termEl.appendChild(row);
+  row.innerHTML = '<span class="ts">' + ts + '</span>';
+  if (entry.service) row.appendChild(serviceTag(entry.service));
+  const text = document.createElement('span');
+  text.className = textClass;
+  text.dataset.raw = entry.line;
+  text.textContent = entry.line;
+  row.appendChild(text);
+  addRow(row);
 }
 
-function appendMarkerLine(status, timeStr) {
+function appendMarkerLine(status, timeStr, service) {
   const label = MARKER_LABEL[status];
   if (!label) return;
-  const empty = termEl.querySelector('.empty-state');
-  if (empty) empty.remove();
   const row = document.createElement('div');
   row.className = 'log-marker marker-' + status;
   const ts = new Date(timeStr).toLocaleTimeString();
-  row.innerHTML = '<span class="ts">' + ts + '</span><span>' + escapeHtml(label) + '</span>';
-  termEl.appendChild(row);
+  row.innerHTML = '<span class="ts">' + ts + '</span>';
+  if (service) row.appendChild(serviceTag(service));
+  row.insertAdjacentHTML('beforeend', '<span>' + escapeHtml(label) + '</span>');
+  addRow(row);
 }
 
+function serviceTag(name) {
+  const tag = document.createElement('span');
+  tag.className = 'svc-tag';
+  tag.style.color = serviceColor(name);
+  tag.textContent = name;
+  tag.title = 'Open ' + name;
+  tag.onclick = () => selectService(name);
+  return tag;
+}
+
+function addRow(row) {
+  const empty = termEl.querySelector('.empty-state');
+  if (empty) empty.remove();
+  if (query) applySearch(row);
+  termEl.appendChild(row);
+  if (query) updateSearchCount();
+  while (termEl.childElementCount > MAX_DOM_LINES) {
+    const first = termEl.firstElementChild;
+    // Removing a row above shifts everything up; scroll back by its height
+    // so the lines you're reading stay put.
+    const h = following ? 0 : first.offsetHeight;
+    first.remove();
+    if (h) termEl.scrollTop -= h;
+  }
+}
+
+// The view follows new lines only while it's scrolled to the bottom. Once
+// you scroll up (to read or search), new lines arrive without moving it,
+// and "Jump to latest" brings you back.
+const jumpEl = document.getElementById('jump-latest');
+let following = true;
+
+function atBottom() {
+  return termEl.scrollHeight - termEl.scrollTop - termEl.clientHeight < 24;
+}
+
+termEl.addEventListener('scroll', () => {
+  following = atBottom();
+  jumpEl.classList.toggle('visible', !following);
+});
+jumpEl.onclick = scrollToBottom;
+
+// scrollToBottom jumps to the newest line and resumes following.
 function scrollToBottom() {
   termEl.scrollTop = termEl.scrollHeight;
+  following = true;
+  jumpEl.classList.remove('visible');
+}
+
+// followNew keeps the newest line in view, but only when following.
+function followNew() {
+  if (following) scrollToBottom();
 }
 
 async function loadServices() {
@@ -302,7 +591,11 @@ async function loadServices() {
   services = {};
   (list || []).forEach(s => { services[s.name] = s; });
   renderList();
-  if (!selected && list && list.length) selectService(list[0].name);
+  if (!selected) {
+    const fromUrl = viewFromHash();
+    if (fromUrl === ALL || (fromUrl && services[fromUrl])) selectService(fromUrl);
+    else if (list && list.length) selectService(list[0].name);
+  }
 }
 
 function connectStream() {
@@ -316,12 +609,18 @@ function connectStream() {
         if (data.service === selected) {
           renderHeaderActions();
           appendMarkerLine(data.status, new Date().toISOString());
-          scrollToBottom();
+          followNew();
+        } else if (selected === ALL) {
+          appendMarkerLine(data.status, new Date().toISOString(), data.service);
+          followNew();
         }
       }
     } else if (data.type === 'log' && data.service === selected) {
       appendLogLine({ time: new Date().toISOString(), stream: data.stream, line: data.line });
-      scrollToBottom();
+      followNew();
+    } else if (data.type === 'log' && selected === ALL) {
+      appendLogLine({ time: new Date().toISOString(), service: data.service, stream: data.stream, line: data.line });
+      followNew();
     }
   };
   es.onerror = () => {
